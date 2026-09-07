@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+outputs/*
+!outputs/metrics/
+outputs/metrics/*
+!outputs/agent_result_20260826_145148.md
+!outputs/metrics/agent_metrics_20260826_145148_014628.json
+chroma_db/
+vectorstores/
+rag/indexes/*.json
+.pytest_cache/

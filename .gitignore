@@ -1,0 +1,60 @@
+# Local assistant and workspace metadata
+.agents/
+.codex/
+
+# Secrets and local environment files
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, caches, and coverage
+**/.venv/
+**/venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Java and frontend dependencies/build output
+**/.gradle/
+**/target/
+**/node_modules/
+**/dist/
+**/build/
+**/coverage/
+
+# Runtime caches, indexes, logs, and temporary files
+langgraph-agent/chroma_db/
+langgraph-agent/vectorstores/
+langgraph-agent/rag/indexes/*.json
+**/*.log
+*.tmp
+*.temp
+*.swp
+*.backup*
+
+# Local model data
+.ollama/
+**/.ollama/
+ollama-models/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated agent output: retain only the selected portfolio evidence pair.
+/langgraph-agent/outputs/*
+!/langgraph-agent/outputs/metrics/
+/langgraph-agent/outputs/metrics/*
+!/langgraph-agent/outputs/agent_result_20260826_145148.md
+!/langgraph-agent/outputs/metrics/agent_metrics_20260826_145148_014628.json
