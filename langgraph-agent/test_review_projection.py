@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 import agents.nodes as nodes
 
@@ -156,7 +157,9 @@ def run_review(state: dict, raw_result: dict | str) -> tuple[dict, str]:
 
     nodes.invoke_agent = fake_invoke
     try:
-        result = nodes.review_agent(state)
+        with patch.object(nodes, "completeness_blockers", return_value={}):
+            # Projection/Evidence behavior is isolated from completeness rules.
+            result = nodes.review_agent(state)
     finally:
         nodes.invoke_agent = original_invoke_agent
     return result, captured["prompt"]

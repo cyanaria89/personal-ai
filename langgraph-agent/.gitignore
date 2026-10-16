@@ -11,4 +11,6 @@ outputs/metrics/*
 chroma_db/
 vectorstores/
 rag/indexes/*.json
+rag/indexes/frontend_index.work/
+rag/tokenizers/
 .pytest_cache/

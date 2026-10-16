@@ -1,5 +1,3 @@
-# State_Management_Part01_State_Classification_and_Ownership.md
-
 # State Management Part01 - State Classification and Ownership
 
 ---

@@ -1,5 +1,6 @@
 import posixpath
 import re
+from validators.artifacts import _fenced_code_blocks
 
 
 IMPLEMENTATION_REQUEST_PATTERNS = [
@@ -55,7 +56,7 @@ def _extract_output_files(frontend_result: str) -> dict[str, dict[str, str]]:
             continue
 
         files[path] = {
-            "language": match.group(2).strip().lower(),
+            "language": {"typescript": "ts", "javascript": "js"}.get(match.group(2).strip().lower(), match.group(2).strip().lower()),
             "content": match.group(3).strip(),
         }
 
@@ -374,6 +375,19 @@ def validate_frontend_result(
 ) -> dict:
     issues = []
     files = _extract_output_files(frontend_result)
+    blocks = _fenced_code_blocks(frontend_result)
+    if files and blocks is not None:
+        for marker in re.finditer(
+            r'(?m)^\[(?:현재 Backend 관련 API 계약|반드시 해결할 (?:Frontend|Integration) Validator Issues|Frontend (?:Validator|Integration) Fix Mode 수정 규칙)\]\s*$',
+            frontend_result,
+        ):
+            if not any(b['start'] <= marker.start() < b['end'] for b in blocks):
+                issues.append({
+                    'severity': 'Major', 'rule': 'COPIED_REFERENCE_OUTPUT',
+                    'message': 'Frontend 산출물에 입력 참고 계약/Issue/Fix 지침이 복사되었습니다.',
+                    'required_fix': 'Files의 모든 실제 Frontend 코드와 필수 계약 설명은 보존하고 입력 참고 영역의 재출력만 제거하세요.',
+                })
+                break
     frontend_files = {
         path: data
         for path, data in files.items()

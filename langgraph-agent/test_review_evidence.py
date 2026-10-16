@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 import agents.nodes as nodes
 
@@ -50,7 +51,9 @@ def run_review(raw_result: str, state: dict | None = None) -> dict:
     original_invoke_agent = nodes.invoke_agent
     nodes.invoke_agent = lambda *args: raw_result
     try:
-        result = nodes.review_agent(state or base_state())
+        with patch.object(nodes, "completeness_blockers", return_value={}):
+            # This helper tests Evidence filtering independently of completeness.
+            result = nodes.review_agent(state or base_state())
     finally:
         nodes.invoke_agent = original_invoke_agent
     return {

@@ -115,6 +115,9 @@ def route_after_backend_validator(
     )
 
     if validation.get("status") == "FAIL":
+        if validation.get('fix', {}).get('status') == 'BLOCKED':
+            print('[Graph] Backend Fix BLOCKED: FAIL을 유지하고 Review로 이동합니다.')
+            return 'review'
         if (
             state.get("backend_fix_count", 0)
             < get_max_agent_fix_count()
@@ -166,7 +169,7 @@ def route_after_integration_validator(
         {"status": "NOT_RUN", "issues": []},
     )
     if validation.get("status") != "FAIL":
-        print("[Graph] Integration Validator 통과: Review로 이동합니다.")
+        print(f"[Graph] Integration Validator 판정={validation.get('status', 'NOT_RUN')}: Review로 이동합니다.")
         return "review"
 
     targets = integration_targets(state)

@@ -1,5 +1,3 @@
-# State_Management_Part02_Context_API_and_useReducer.md
-
 # State Management Part02 - Context API and useReducer
 
 ---

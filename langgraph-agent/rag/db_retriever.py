@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from array import array
 import math
 import urllib.error
 import urllib.request
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 
@@ -27,6 +29,111 @@ EMBED_MODEL = "bge-m3"
 
 MIN_CHUNK_LENGTH = 80
 MAX_CHUNK_LENGTH = 1800
+
+# 02_DB_Agent_RAG_Map / 03_Backend_Agent_RAG_Map의 Domain Rules와
+# 실제 foundation 디렉터리 간 명시적인 대응. Reference-only는 허용하지 않는다.
+DOMAIN_FOUNDATION_DIRS = {
+    "01_SQL_Domain_Rules.md": "01_SQL",
+    "02_Java_Domain_Rules.md": "02_Java",
+    "03_Spring_Boot_Domain_Rules.md": "03_SpringBoot",
+    "04_JPA_Advanced_Domain_Rules.md": "04_JPA_Advanced",
+    "05_Security_Advanced_Domain_Rules.md": "05_Security_Advanced",
+    "06_QueryDSL_Practical_Domain_Rules.md": "06_QueryDSL_Practical",
+    "07_Testing_Domain_Rules.md": "07_Testing",
+    "08_Redis_Domain_Rules.md": "08_Redis",
+    "09_SSR_Thymeleaf_Domain_Rules.md": "09_SSR_Thymeleaf",
+    "10_Git_GitHub_Domain_Rules.md": "10_Git_GitHub",
+    "11_Docker_Domain_Rules.md": "11_Docker",
+    "12_API_Design_Domain_Rules.md": "12_API_Design",
+    "13_Design_Pattern_Domain_Rules.md": "13_Design_Pattern",
+}
+
+FRONTEND_FOUNDATION_DIRS = {
+    "01_HTML_CSS_Foundation_Domain_Rules.md": "01_HTTP_CSS_Foundation",
+    "02_JavaScript_Foundation_Domain_Rules.md": "02_JavaScript_Foundation",
+    "03_TypeScript_Foundation_Domain_Rules.md": "03_TypeScript_Foundation",
+    "04_React_Core_Domain_Rules.md": "04_React_Core",
+    "05_React_Component_Design_Domain_Rules.md": "05_React_Component_Design",
+    "06_React_Router_Domain_Rules.md": "06_React_Router",
+    "07_State_Management_Domain_Rules.md": "07_State_Management",
+    "08_Data_Fetching_REST_API_Integration_Domain_Rules.md": "08_Data_Fetching_REST_API_Integration",
+    "09_Form_Handling_Validation_Domain_Rules.md": "09_Form_Handling_Validation",
+    "10_Authentication_Frontend_Flow_Domain_Rules.md": "10_Authentication_Frontend_Flow",
+    "11_Error_Handling_Loading_UX_Domain_Rules.md": "11_Error_Handling_Loading_UX",
+    "12_UI_Component_Pattern_Domain_Rules.md": "12_UI_Component_Pattern",
+    "13_Frontend_Testing_Domain_Rules.md": "13_Frontend_Testing",
+    "14_Frontend_Accessibility_Domain_Rules.md": "14_Frontend_Accessibility",
+    "15_Frontend_Build_Deploy_Domain_Rules.md": "15_Frontend_Build_Deploy",
+    "16_Frontend_Code_Review_Domain_Rules.md": "16_Frontend_Code_Review",
+    "17_Styling_Architecture_Domain_Rules.md": "17_Styling_Architecture",
+    "18_Design_System_Foundation_Domain_Rules.md": "18_Design_System_Foundation",
+}
+
+AGENT_DOMAIN_RULES = {
+    "frontend": {
+        "primary": tuple(FRONTEND_FOUNDATION_DIRS),
+        "secondary": ("12_API_Design_Domain_Rules.md", "05_Security_Advanced_Domain_Rules.md",
+                      "10_Git_GitHub_Domain_Rules.md", "11_Docker_Domain_Rules.md"),
+    },
+    "db": {
+        "primary": ("01_SQL_Domain_Rules.md", "04_JPA_Advanced_Domain_Rules.md",
+                    "06_QueryDSL_Practical_Domain_Rules.md"),
+        "secondary": ("03_Spring_Boot_Domain_Rules.md", "12_API_Design_Domain_Rules.md",
+                      "13_Design_Pattern_Domain_Rules.md", "07_Testing_Domain_Rules.md"),
+    },
+    "backend": {
+        "primary": ("02_Java_Domain_Rules.md", "03_Spring_Boot_Domain_Rules.md",
+                    "04_JPA_Advanced_Domain_Rules.md", "05_Security_Advanced_Domain_Rules.md",
+                    "06_QueryDSL_Practical_Domain_Rules.md", "12_API_Design_Domain_Rules.md",
+                    "13_Design_Pattern_Domain_Rules.md"),
+        "secondary": ("01_SQL_Domain_Rules.md", "07_Testing_Domain_Rules.md",
+                      "08_Redis_Domain_Rules.md", "09_SSR_Thymeleaf_Domain_Rules.md",
+                      "10_Git_GitHub_Domain_Rules.md", "11_Docker_Domain_Rules.md"),
+    },
+}
+
+
+def classify_source(source: str) -> str | None:
+    """기존 source 경로를 Domain Rules 파일명으로 분류한다."""
+    if not isinstance(source, str):
+        return None
+    parts = PurePosixPath(source).parts
+    if parts[:2] != ("data", "rag-source") or ".." in parts:
+        return None
+    mappings = {"backend": DOMAIN_FOUNDATION_DIRS, "frontend": FRONTEND_FOUNDATION_DIRS}
+    for area, mapping in mappings.items():
+        if len(parts) == 4 and parts[2] == f"{area}-domain":
+            return parts[3] if parts[3] in mapping else None
+        if len(parts) != 5 or parts[2] != f"{area}-foundation" or not parts[4].endswith(".md"):
+            continue
+        for rule, directory in mapping.items():
+            if parts[3] == directory:
+                return rule
+    return None
+
+
+def allowed_domain_rules(agent: str) -> set[str]:
+    if agent not in AGENT_DOMAIN_RULES:
+        raise ValueError(f"지원하지 않는 Domain RAG Agent입니다: {agent}")
+    policy = AGENT_DOMAIN_RULES[agent]
+    return set(policy["primary"]) | set(policy["secondary"])
+
+
+def filter_agent_chunks(chunks: list[dict[str, Any]], agent: str) -> list[dict[str, Any]]:
+    allowed = allowed_domain_rules(agent)
+    candidates = []
+    unclassified = set()
+    for chunk in chunks:
+        source = chunk.get("source", "")
+        domain = classify_source(source)
+        if domain is None:
+            unclassified.add(str(source))
+        elif domain in allowed:
+            candidates.append(chunk)
+    for source in sorted(unclassified):
+        print(f"[{agent.upper()} RAG 경고] 미분류 문서 제외: {source or '(source 없음)'}")
+    print(f"[{agent.upper()} RAG] 허용 후보 {len(candidates)}/{len(chunks)}개 chunks")
+    return candidates
 
 
 def read_markdown_files() -> list[dict[str, str]]:
@@ -342,14 +449,30 @@ def search_db_context(
     query: str,
     top_k: int = 5,
 ) -> list[dict[str, Any]]:
-    """질의와 유사한 DB RAG 문서 조각을 검색한다."""
+    """DB Primary/Secondary 문서 범위에서 검색한다."""
+    return search_domain_context(query, agent="db", top_k=top_k)
+
+
+def search_domain_context(
+    query: str,
+    *,
+    agent: str,
+    top_k: int = 3,
+    chunks=None,
+) -> list[dict[str, Any]]:
+    """Agent별 후보를 먼저 제한한 뒤 기존 임베딩과 점수로 검색한다."""
+    allowed_domain_rules(agent)
 
     query = query.strip()
 
     if not query:
         return []
 
-    chunks = load_db_index()
+    if agent == "frontend" and chunks is None:
+        raise ValueError("Frontend 검색은 wrapper에서 두 인덱스 후보를 전달해야 합니다.")
+    chunks = filter_agent_chunks(load_db_index() if chunks is None else chunks, agent)
+    if not chunks:
+        return []
     query_embedding = embed_texts([query])[0]
 
     scored_chunks: list[dict[str, Any]] = []
@@ -357,7 +480,7 @@ def search_db_context(
     for chunk in chunks:
         embedding = chunk.get("embedding")
 
-        if not isinstance(embedding, list):
+        if not isinstance(embedding, (list, array)):
             continue
 
         score = cosine_similarity(
@@ -384,11 +507,13 @@ def search_db_context(
 
 def format_db_context(
     results: list[dict[str, Any]],
+    *,
+    domain: str = "DB",
 ) -> str:
     """검색 결과를 DB Agent 프롬프트용 문자열로 만든다."""
 
     if not results:
-        return "검색된 DB RAG 문서가 없습니다."
+        return f"검색된 {domain} RAG 문서가 없습니다."
 
     sections: list[str] = []
 
@@ -399,7 +524,7 @@ def format_db_context(
         sections.append(
             "\n".join(
                 [
-                    f"[DB RAG {index}]",
+                    f"[{domain} RAG {index}]",
                     f"Source: {result['source']}",
                     f"Heading: {result['heading'] or '없음'}",
                     f"Score: {result['score']:.4f}",

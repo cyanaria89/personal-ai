@@ -7,15 +7,25 @@ import time
 from langchain_core.messages import HumanMessage, SystemMessage
 from config import get_llm
 from prompts.loader import load_agent_prompt, load_master_context
+from prompts.frontend_context import project_previous_frontend, FIX_OUTPUT_RULES
 from state import AgentState
 from rag.db_retriever import format_db_context, search_db_context
+from rag.backend_retriever import format_backend_context, search_backend_context
+from rag.frontend_retriever import search_frontend_context
+from rag.prompt_budget import pack_frontend_rag, prompt_counter
 from project_context.loader import (
     ProjectContext,
     format_project_context_for_agent,
     load_project_context,
 )
 
+from validators.artifacts import _markdown_sections, _fenced_code_blocks
+from validators.completeness_validator import attach_completeness, completeness_blockers, fix_validation_payload
 from validators.backend_validator import validate_backend_result
+from validators.backend_fix_validator import (
+    prepare_backend_fix, assess_backend_fix, backend_fix_blocker, backend_fix_report,
+    backend_contract_prompt, FIX_INSTRUCTION,
+)
 from validators.backend_auto_fixer import auto_fix_backend_result
 from validators.db_validator import validate_db_result
 from validators.frontend_validator import validate_frontend_result
@@ -38,7 +48,7 @@ backend_llm = get_llm(
 )
 
 frontend_llm = get_llm(
-    context_size=10240,
+    context_size=12288,
     num_predict=2048,
 )
 
@@ -297,7 +307,7 @@ def _append_truncated_output_issue(
             "message": f"{agent_name.title()} LLM 출력이 길이 제한으로 중단되었습니다.",
             "required_fix": "잘린 결과를 이어 붙이지 말고 완전한 전체 결과를 다시 생성하세요.",
         })
-    return {"status": "FAIL", "issues": issues}
+    return {**validation, "status": "FAIL", "issues": issues}
 
 
 def extract_frontend_fix_project_context(project_plan: str) -> str:
@@ -337,48 +347,6 @@ def extract_frontend_fix_project_context(project_plan: str) -> str:
 
     return "\n\n".join(selected_sections)
 
-
-def _markdown_sections(markdown: str) -> list[dict] | None:
-    """fenced code를 제외한 Markdown heading의 안전한 섹션 범위를 구한다."""
-
-    lines = markdown.splitlines(keepends=True)
-    headings = []
-    offset = 0
-    fence_marker = None
-
-    for line in lines:
-        stripped = line.lstrip()
-        fence_match = re.match(r"(`{3,}|~{3,})", stripped)
-        if fence_match:
-            marker = fence_match.group(1)
-            if fence_marker is None:
-                fence_marker = marker[0]
-            elif marker[0] == fence_marker:
-                fence_marker = None
-            offset += len(line)
-            continue
-
-        if fence_marker is None:
-            heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line.rstrip("\n"))
-            if heading_match:
-                headings.append({
-                    "level": len(heading_match.group(1)),
-                    "title": heading_match.group(2).strip(),
-                    "start": offset,
-                })
-        offset += len(line)
-
-    if fence_marker is not None:
-        return None
-
-    for index, heading in enumerate(headings):
-        heading["end"] = len(markdown)
-        for next_heading in headings[index + 1:]:
-            if next_heading["level"] <= heading["level"]:
-                heading["end"] = next_heading["start"]
-                break
-
-    return headings
 
 
 def extract_frontend_fix_backend_context(backend_result: str) -> str:
@@ -529,47 +497,6 @@ def extract_frontend_initial_backend_context(backend_result: str) -> str:
     return "\n\n".join(contents)
 
 
-def _fenced_code_blocks(markdown: str) -> list[dict] | None:
-    """Markdown fenced code block의 언어와 원문 범위를 안전하게 구한다."""
-
-    lines = markdown.splitlines(keepends=True)
-    blocks = []
-    opening = None
-    offset = 0
-
-    for line in lines:
-        if opening is None:
-            match = re.match(
-                r"^\s*(?P<fence>`{3,}|~{3,})(?P<language>[\w+-]*)\s*$",
-                line.rstrip("\r\n"),
-            )
-            if match:
-                opening = {
-                    "marker": match.group("fence")[0],
-                    "length": len(match.group("fence")),
-                    "language": match.group("language").lower(),
-                    "start": offset,
-                }
-        else:
-            closing = re.match(
-                rf"^\s*{re.escape(opening['marker'])}"
-                rf"{{{opening['length']},}}\s*$",
-                line.rstrip("\r\n"),
-            )
-            if closing:
-                blocks.append({
-                    "language": opening["language"],
-                    "start": opening["start"],
-                    "end": offset + len(line),
-                })
-                opening = None
-        offset += len(line)
-
-    if opening is not None:
-        return None
-
-    return blocks
-
 
 def _section_for_code_block(
     sections: list[dict],
@@ -702,7 +629,7 @@ def project_frontend_result_for_review(frontend_result: str) -> str:
     if blocks is None or sections is None:
         return frontend_result
 
-    allowed_languages = {"tsx", "ts", "jsx", "js", "css"}
+    allowed_languages = {"tsx", "ts", "typescript", "jsx", "js", "javascript", "css"}
     frontend_blocks = [
         block for block in blocks if block["language"] in allowed_languages
     ]
@@ -973,6 +900,8 @@ def db_validator(state: AgentState) -> dict:
         f"이슈={len(validation_result['issues'])}개"
     )
 
+    validation_result = attach_completeness(validation_result, db_result, state, "db")
+
     return {
         "db_validation": validation_result
     }
@@ -1018,6 +947,12 @@ def backend_agent(state: AgentState) -> dict:
         {"status": "NOT_RUN", "issues": []},
     )
     is_fix_run = backend_validation.get("status") == "FAIL"
+    backend_fix = None
+    if is_fix_run:
+        backend_fix = prepare_backend_fix(state, backend_validation)
+        if backend_fix['status'] == 'BLOCKED':
+            print('[Backend Fix] BLOCKED: 확인된 인증 발급 계약이 부족합니다. LLM 호출을 생략합니다.')
+            return {'backend_validation': {**backend_validation, 'fix': backend_fix}}
     integration_validation = state.get(
         "integration_validation",
         {"status": "NOT_RUN", "issues": []},
@@ -1036,7 +971,7 @@ def backend_agent(state: AgentState) -> dict:
     fix_instruction = (
         "[Backend Validator 재작업 요청]\n"
         + json.dumps(
-            backend_validation,
+            fix_validation_payload({k: v for k, v in backend_validation.items() if k != 'fix'}),
             ensure_ascii=False,
             indent=2,
         )
@@ -1054,8 +989,7 @@ def backend_agent(state: AgentState) -> dict:
     user_prompt = f"""
 다음 정보를 기반으로 Backend 담당 범위의 결과를 작성하세요.
 
-아직 Backend RAG 검색은 연결되지 않았습니다.
-현재 제공된 정보만 사용하고,
+현재 제공된 정보와 Backend Domain RAG를 참고하고,
 불확실한 부분은 명시하세요.
 
 {CONTEXT_PRIORITY_INSTRUCTION}
@@ -1143,7 +1077,12 @@ public class ExampleService {{
 {state.get('backend_result', '')}
 
 [반드시 해결할 Backend Validator Issues]
-{json.dumps(backend_validation, ensure_ascii=False, indent=2)}
+{json.dumps(fix_validation_payload({k: v for k, v in backend_validation.items() if k != 'fix'}), ensure_ascii=False, indent=2)}
+
+{FIX_INSTRUCTION}
+
+[확인된 프로젝트 발급 계약 source — RAG와 구분]
+{json.dumps(backend_contract_prompt(backend_fix), ensure_ascii=False, indent=2)}
 
 [Fix Mode 수정 규칙]
 
@@ -1209,6 +1148,46 @@ public class ExampleService {{
 수정된 전체 Backend 결과만 출력하세요.
 """.strip()
 
+    # 모든 Backend 모드에 동일하게 주입하되 Project Context와 구분한다.
+    print("[Backend Agent] Domain RAG 문서를 검색합니다.")
+    try:
+        rag_results = search_backend_context(state["user_request"], top_k=3)
+        backend_rag_context = format_backend_context(rag_results)
+        print(f"[Backend Agent] Domain RAG {len(rag_results)}개 검색 완료")
+    except Exception as exc:
+        # 검색/인덱스/임베딩 실패는 Backend 생성과 fix loop를 중단하지 않는다.
+        print(f"[Backend Agent 경고] Domain RAG 검색에 실패했습니다: {exc}")
+        backend_rag_context = (
+            "Backend Domain RAG 검색을 사용할 수 없습니다. "
+            "현재 제공된 Project Context와 규칙, 사용자 요구사항을 기준으로 작업하세요."
+        )
+
+    user_prompt += f"""
+
+[Backend Domain RAG — general technical guidance]
+{backend_rag_context}
+[End Backend Domain RAG]
+
+검색된 문서는 일반 기술 지식입니다. 실제 프로젝트 정보와 사용자 요구사항을 우선하세요.
+RAG 문서에 없는 내용을 문서에 있다고 표현하지 마세요.
+"""
+
+    if backend_fix:
+        counter, counter_kind = prompt_counter(backend_llm.model)
+        tokens = counter(system_prompt, user_prompt)
+        backend_fix['prompt_budget'] = {
+            'counter': counter_kind, 'input_tokens': tokens,
+            'num_ctx': backend_llm.num_ctx, 'reserved_output': backend_llm.num_predict,
+            'safety_tokens': 256,
+        }
+        if tokens + backend_llm.num_predict + 256 > backend_llm.num_ctx:
+            print('[Backend Fix] BLOCKED: 기존 코드와 계약을 보존할 Prompt 예산이 부족합니다.')
+            return {'backend_validation': {**backend_validation, 'fix': {
+                **backend_fix, 'status': 'BLOCKED',
+                'reason': '입력·출력 예약·안전 여유가 Backend Context 예산을 초과합니다.',
+                'needed_information': ['코드와 필수 계약을 보존할 Prompt 공간 확보가 필요합니다.'],
+            }}}
+
     start_time = time.perf_counter()
 
     mode = (
@@ -1235,12 +1214,27 @@ public class ExampleService {{
     print(f"[Backend Agent] LLM 처리시간: {elapsed:.1f}초")
     print("[Backend Agent 완료]")
 
-    return {
+    if backend_fix and re.match(r'\s*BACKEND_FIX_STATUS:\s*BLOCKED\b', result):
+        print('[Backend Fix] 모델이 계약 부족을 보고했습니다. 기존 코드와 FAIL을 유지합니다.')
+        return {
+            'backend_result': state.get('backend_result', ''),
+            'backend_validation': {**backend_validation, 'fix': {
+                **backend_fix, 'status': 'BLOCKED', 'reason': result,
+                'needed_information': ['모델 BLOCKED 응답의 계약/구현 요청을 확인하세요.'],
+            }},
+            'backend_fix_count': next_fix_count,
+            'llm_metrics': new_metrics,
+        }
+
+    update = {
         "backend_result": result,
         "backend_fix_count": next_fix_count,
         "integration_fix_count": next_integration_fix_count,
         "llm_metrics": new_metrics,
     }
+    if backend_fix:
+        update['backend_validation'] = {**backend_validation, 'fix': {**backend_fix, 'status': 'RUNNING'}}
+    return update
 
 
 def backend_validator(state: AgentState) -> dict:
@@ -1288,6 +1282,15 @@ def backend_validator(state: AgentState) -> dict:
             f"이슈={len(validation_result['issues'])}개"
         )
 
+    validation_result = attach_completeness(validation_result, backend_result, state, "backend")
+    validation_result = assess_backend_fix(state, backend_result, validation_result)
+    if validation_result['status'] == 'FAIL' and any(
+        i.get('rule') == 'FAKE_AUTH_TOKEN' for i in validation_result.get('issues', [])
+    ) and 'fix' not in validation_result:
+        fix = prepare_backend_fix({**state, 'backend_result': backend_result}, validation_result)
+        if fix['status'] == 'BLOCKED':
+            validation_result['fix'] = fix
+
     return {
         "backend_result": backend_result,
         "backend_validation": validation_result,
@@ -1298,7 +1301,6 @@ def frontend_agent(state: AgentState) -> dict:
     """PM 계획과 Backend 결과를 바탕으로 Frontend 작업을 작성한다."""
 
     new_metrics = [*state.get("llm_metrics", [])]
-    system_prompt = load_agent_prompt("frontend")
 
     required_agents = state.get(
         "required_agents",
@@ -1355,7 +1357,7 @@ def frontend_agent(state: AgentState) -> dict:
     fix_instruction = (
         "[Frontend Validator 재작업 요청]\n"
         + json.dumps(
-            frontend_validation,
+            fix_validation_payload(frontend_validation),
             ensure_ascii=False,
             indent=2,
         )
@@ -1365,6 +1367,14 @@ def frontend_agent(state: AgentState) -> dict:
         if is_fix_run
         else "첫 실행이므로 Validator 재작업 요청이 없습니다."
     )
+    previous_frontend = project_previous_frontend(
+        state.get("frontend_result", ""), frontend_fix_backend_context
+    ) if is_fix_run or is_integration_fix_run else state.get("frontend_result", "")
+    if is_fix_run or is_integration_fix_run:
+        compact_contract = extract_frontend_initial_backend_context(backend_result)
+        if compact_contract != backend_result:
+            # DTO/Method/Path/Status/Handoff를 유지하고 Controller 구현/import 중복만 줄인다.
+            frontend_fix_backend_context = compact_contract
     current_project_context = project_context_projection(
         state,
         "frontend",
@@ -1374,7 +1384,6 @@ def frontend_agent(state: AgentState) -> dict:
     user_prompt = f"""
 다음 정보를 기반으로 Frontend 담당 범위의 결과를 작성하세요.
 
-아직 Frontend RAG 검색은 연결되지 않았습니다.
 기존 Frontend System Prompt와 Agent Rules를 따르고,
 현재 제공된 정보만 사용하세요.
 
@@ -1464,13 +1473,13 @@ Frontend Validator Issue만 최소 수정하세요.
 {frontend_fix_project_context}
 
 [수정 대상 기존 Frontend 결과]
-{state.get('frontend_result', '')}
+{previous_frontend}
 
 [현재 Backend 관련 API 계약]
 {frontend_fix_backend_context}
 
 [반드시 해결할 Frontend Validator Issues]
-{json.dumps(frontend_validation, ensure_ascii=False, indent=2)}
+{json.dumps(fix_validation_payload(frontend_validation), ensure_ascii=False, indent=2)}
 
 [Frontend Validator Fix Mode 수정 규칙]
 
@@ -1504,7 +1513,7 @@ Frontend Validator Issue만 최소 수정하세요.
 {frontend_fix_project_context}
 
 [수정 대상 기존 Frontend 결과]
-{state.get('frontend_result', '')}
+{previous_frontend}
 
 [현재 Backend 관련 API 계약]
 {frontend_fix_backend_context}
@@ -1523,8 +1532,6 @@ Frontend Validator Issue만 최소 수정하세요.
 수정된 전체 Frontend 결과만 출력하세요.
 """.strip()
 
-    start_time = time.perf_counter()
-
     selected_llm = (
         frontend_fix_llm
         if is_fix_run or is_integration_fix_run
@@ -1538,6 +1545,46 @@ Frontend Validator Issue만 최소 수정하세요.
         if is_integration_fix_run
         else "initial"
     )
+    projection_mode = mode if (
+        is_fix_run or is_integration_fix_run
+        or (re.search(r"구현|작성|추가|개발|만들|implement|build|create", state["user_request"], re.I)
+            and not re.search(r"설계만|분석만|계획만|리뷰만|design only|analysis only", state["user_request"], re.I))
+    ) else None
+    system_prompt = load_agent_prompt("frontend", mode=projection_mode)
+    if is_fix_run or is_integration_fix_run:
+        user_prompt += "\n\n" + FIX_OUTPUT_RULES
+    rag_started = time.perf_counter()
+    rag_results = []
+    rag_status = "not_selected"
+    if "frontend" in required_agents:
+        try:
+            rag_results = search_frontend_context(state["user_request"], top_k=3)
+            rag_status = "ok" if rag_results else "empty"
+        except Exception as exc:
+            print(f"[Frontend Agent 경고] Domain RAG 검색 실패: {exc}")
+            rag_status = "search_failed"
+    search_seconds = time.perf_counter() - rag_started
+    user_prompt, rag_metrics = pack_frontend_rag(
+        system_prompt, user_prompt, rag_results, model=selected_llm.model,
+        num_ctx=selected_llm.num_ctx, num_predict=selected_llm.num_predict, status=rag_status,
+        rag_headroom=128,
+    )
+    rag_metrics["search_seconds"] = search_seconds
+    print(f"[Frontend Agent] Domain RAG 검색={len(rag_results)}개, 주입={rag_metrics['injected_count']}개, "
+          f"Prompt={rag_metrics['prompt_tokens']}/{rag_metrics['input_limit']} tokens, "
+          f"출력 예약={selected_llm.num_predict}, 검색={search_seconds:.2f}초, counter={rag_metrics['counter']}")
+    if rag_metrics["budget_exceeded"]:
+        print("[Frontend Agent 경고] 핵심 Prompt가 예약 예산을 초과했습니다. RAG를 생략하고 기존 입력을 유지합니다.")
+        raise ValueError(
+            f"Frontend 핵심 Prompt {rag_metrics['base_prompt_tokens']} tokens가 "
+            f"출력·안전 여유를 예약한 한도 {rag_metrics['input_limit']}를 초과합니다. "
+            f"counter={rag_metrics['counter']}. "
+            "핵심 계약은 삭제하지 않았으며, 입력 잘림을 막기 위해 LLM 호출을 중단합니다."
+        )
+    for source in rag_metrics["injected_sources"]:
+        print(f"[Frontend Agent] Domain RAG 주입 출처: {source}")
+    metric_count = len(new_metrics)
+    start_time = time.perf_counter()
     result = invoke_agent_with_metrics(
         selected_llm,
         system_prompt,
@@ -1549,6 +1596,16 @@ Frontend Validator Issue만 최소 수정하세요.
         },
         metrics_sink=new_metrics,
     )
+    if len(new_metrics) > metric_count and "prompt_eval_count" in new_metrics[-1]:
+        metric = new_metrics[-1]
+        actual = metric.get("prompt_eval_count")
+        if isinstance(actual, (int, float)):
+            rag_metrics["prompt_count_delta"] = actual - rag_metrics["prompt_tokens"]
+            rag_metrics["actual_within_budget"] = actual <= rag_metrics["input_limit"]
+            rag_metrics["input_count_matches"] = actual == rag_metrics["prompt_tokens"]
+            print(f"[Frontend Agent] 실제 Prompt={actual}, 예상 차이={rag_metrics['prompt_count_delta']}, "
+                  f"예약 예산 준수={rag_metrics['actual_within_budget']}")
+        metric["domain_rag"] = rag_metrics
 
     elapsed = time.perf_counter() - start_time
 
@@ -1582,6 +1639,8 @@ def frontend_validator(state: AgentState) -> dict:
         f"이슈={len(validation_result['issues'])}개"
     )
 
+    validation_result = attach_completeness(validation_result, state.get("frontend_result", ""), state, "frontend")
+
     return {
         "frontend_validation": validation_result,
     }
@@ -1589,6 +1648,8 @@ def frontend_validator(state: AgentState) -> dict:
 
 def integration_validator(state: AgentState) -> dict:
     """Backend와 Frontend 사이의 결정적인 API 계약을 검증한다."""
+    if not {"backend", "frontend"}.issubset(state.get("required_agents", [])):
+        return {"integration_validation": {"status": "NOT_RUN", "issues": []}}
     validation_result = validate_integration_result(
         state.get("backend_result", ""),
         state.get("frontend_result", ""),
@@ -1604,6 +1665,23 @@ def integration_validator(state: AgentState) -> dict:
 
     return {
         "integration_validation": validation_result,
+    }
+
+
+def integration_verification_blocker(state: AgentState) -> dict | None:
+    """Required API integration must be verified before final success."""
+    if not {"backend", "frontend"}.issubset(state.get("required_agents", [])):
+        return None
+    validation = state.get("integration_validation") or {"status": "NOT_RUN", "issues": []}
+    if validation.get("status") == "PASS":
+        return None
+    return {
+        **validation,
+        "issues": validation.get("issues") or [{
+            "severity": "Major", "rule": "INTEGRATION_NOT_VERIFIED",
+            "message": f"필수 API 연동 검증이 완료되지 않았습니다: {validation.get('status', 'UNKNOWN')}",
+            "required_fix": "Backend와 Frontend의 API 계약을 검증하세요.",
+        }],
     }
 
 
@@ -1726,7 +1804,7 @@ def review_agent(state: AgentState) -> dict:
 {backend_review_source or 'Backend Agent 미실행'}
 
 [Backend Validator 결과]
-{state.get('backend_validation', {'status': 'NOT_RUN', 'issues': []})}
+{backend_fix_report(state.get('backend_validation', {'status': 'NOT_RUN', 'issues': []}))}
 
 [Frontend 결과]
 {frontend_review_source or 'Frontend Agent 미실행'}
@@ -1736,6 +1814,9 @@ def review_agent(state: AgentState) -> dict:
 
 [Integration Validator 결과]
 {state.get('integration_validation', {'status': 'NOT_RUN', 'issues': []})}
+
+[Completeness 검사 결과 — 정적 Stub 검사]
+{json.dumps({agent: state.get(agent + "_validation", {}).get("completeness", {}) for agent in ("db", "backend", "frontend") if agent in state.get("required_agents", [])}, ensure_ascii=False)}
 
 [Fix Loop 상태]
 
@@ -1754,6 +1835,8 @@ def review_agent(state: AgentState) -> dict:
 - evidence.source는 DB, Backend, Frontend 중 하나이고, evidence.quote는 해당 Review Source에 실제 존재하는 짧은 원문이어야 합니다.
 - password 저장 흐름은 실제 코드를 끝까지 확인하고, PasswordEncoder.encode(...) 결과가 저장되면 평문 저장으로 판단하지 마세요.
 - Validator가 PASS한 mechanical rule과 반대되는 Issue를 근거 없이 만들지 마세요.
+- Backend와 Frontend가 모두 실행되었다면 Integration의 FAIL / NOT_VERIFIED / NOT_RUN을 최종 성공으로 보증하지 마세요.
+- 필수 Completeness FAIL / NOT_VERIFIED를 성공으로 보증하지 마세요. 정적 검사 통과와 빌드·실행 검증을 구분하세요.
 - API/DTO 불일치는 양쪽 실제 코드를 확인한 경우에만 Issue로 만드세요.
 - 문제가 없으면 status는 PASS이고 issues는 빈 배열이며, Issue가 있으면 status는 FAIL입니다.
 - JSON 외의 텍스트를 출력하지 마세요.
@@ -1884,12 +1967,18 @@ def review_agent(state: AgentState) -> dict:
         (
             "integration",
             "Integration Validator",
-            state.get(
+            integration_verification_blocker(state) or state.get(
                 "integration_validation",
                 {"status": "NOT_RUN", "issues": []},
             ),
         ),
     ]
+    completeness_failures = completeness_blockers(state)
+    fix_blocker = backend_fix_blocker(state)
+    if fix_blocker:
+        validator_results.append(('backend', 'Backend Fix Safety', fix_blocker))
+    for agent, completeness in completeness_failures.items():
+        validator_results.append((agent, f"{agent.title()} Completeness Validator", completeness))
     remaining_validator_failures = False
 
     for agent_name, area, validation in validator_results:
@@ -1897,10 +1986,12 @@ def review_agent(state: AgentState) -> dict:
             agent_name == "integration"
             and {"backend", "frontend"}.issubset(required_agents)
         )
-        if (
-            not is_required
-            or validation.get("status") != "FAIL"
-        ):
+        blocks_success = (
+            validation.get("status") != "PASS"
+            if agent_name == "integration" or "Completeness" in area or area == 'Backend Fix Safety'
+            else validation.get("status") == "FAIL"
+        )
+        if not is_required or not blocks_success:
             continue
 
         remaining_validator_failures = True
@@ -1960,7 +2051,7 @@ def review_agent(state: AgentState) -> dict:
     if remaining_validator_failures:
         status = "FAIL"
         review_data["summary"] = (
-            "최대 재작업 후에도 Validator Issue가 남아 있습니다."
+            "필수 Validator 검증이 실패했거나 미검증 상태입니다."
         )
 
     if not review_json_parsed or remaining_validator_failures or issues:
@@ -2005,6 +2096,15 @@ def review_agent(state: AgentState) -> dict:
 
 def final_agent(state: AgentState) -> dict:
     """각 Agent 결과를 하나의 최종 결과로 합친다."""
+    integration_blocker = integration_verification_blocker(state)
+    completeness_failures = completeness_blockers(state)
+    fix_blocker = backend_fix_blocker(state)
+    final_status = "FAIL" if integration_blocker or completeness_failures or fix_blocker else state["review_status"]
+    completeness_report = json.dumps({agent: state.get(agent + "_validation", {}).get("completeness") or completeness_failures.get(agent, {}) for agent in ("db", "backend", "frontend") if agent in state.get("required_agents", [])}, ensure_ascii=False, indent=2)
+    integration_result = json.dumps(
+        integration_blocker or state.get("integration_validation", {"status": "NOT_RUN", "issues": []}),
+        ensure_ascii=False, indent=2,
+    )
 
     final_result = f"""
 # 최종 작업 결과
@@ -2045,9 +2145,25 @@ def final_agent(state: AgentState) -> dict:
 
 ---
 
+## Integration Validator 결과
+
+{integration_result}
+
+---
+
+## Completeness 검사 결과
+
+{completeness_report}
+
+검증 범위: 지원하는 정적 Stub 패턴. 빌드·실행·기능 전체 검증은 미실행(NOT_VERIFIED)입니다.
+
+---
+
 ## 최종 판정
 
-{state['review_status']}
+Backend Fix 상태: {json.dumps(backend_fix_report(state.get('backend_validation', {})).get('fix', {'status': 'NOT_APPLICABLE'}), ensure_ascii=False)}
+
+{final_status}
 """.strip()
 
     print("[최종 결과 생성 완료]")

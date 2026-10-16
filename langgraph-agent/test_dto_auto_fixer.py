@@ -56,6 +56,7 @@ class DtoAutoFixerTest(unittest.TestCase):
 
     def test_backend_validator_auto_fix_passes_without_llm_fix_route(self) -> None:
         state = {
+            "user_request": "기존 회원가입 Service의 DTO import를 수정해줘",
             "backend_result": BACKEND,
             "project_context": project_context(),
             "backend_validation": {"status": "NOT_RUN", "issues": []},

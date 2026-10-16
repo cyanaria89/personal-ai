@@ -118,8 +118,8 @@ def test_integration_fix_uses_fix_llm_and_preserves_state_policy() -> None:
     assert result["integration_fix_count"] == 2
 
 
-def test_frontend_llm_settings_are_unchanged() -> None:
-    assert nodes.frontend_llm.num_ctx == 10240
+def test_frontend_initial_llm_reserves_output_and_rag_space() -> None:
+    assert nodes.frontend_llm.num_ctx == 12288
     assert nodes.frontend_llm.num_predict == 2048
 
 

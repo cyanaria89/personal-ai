@@ -1,5 +1,3 @@
-# Vector_Database_RAG_Part06_Evaluation_Troubleshooting.md
-
 # Vector Database & RAG Part06 Evaluation and Troubleshooting
 
 ---

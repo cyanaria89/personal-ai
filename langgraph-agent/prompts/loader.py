@@ -74,7 +74,7 @@ def read_markdown(path: Path) -> str:
     return content
 
 
-def load_agent_prompt(agent_name: str) -> str:
+def load_agent_prompt(agent_name: str, *, mode: str | None = None) -> str:
     """
     공통 System Rules, Agent 전용 System Rules,
     공통 Agent Rules, Agent 전용 Rules를 결합한다.
@@ -108,6 +108,10 @@ def load_agent_prompt(agent_name: str) -> str:
         AGENT_RULES_DIR
         / file_map["rules"]
     )
+
+    if agent_key == 'frontend' and mode is not None:
+        from prompts.frontend_context import project_frontend_rules
+        agent_system, agent_rules = project_frontend_rules(agent_system, agent_rules, mode)
 
     return "\n\n".join(
         [

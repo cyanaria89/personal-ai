@@ -6,7 +6,7 @@ JAVA_BLOCK_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 FRONTEND_BLOCK_PATTERN = re.compile(
-    r"```(?:tsx|ts|jsx|js)\s*\n(.*?)```",
+    r"```(?:typescript|javascript|tsx|ts|jsx|js)[ \t]*\r?\n(.*?)```",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -23,6 +23,8 @@ def _matching_brace(source: str, opening_index: int) -> int | None:
     index = opening_index
     state = "code"
     quote = ""
+    opening = source[opening_index]
+    closing = {"{": "}", "(": ")"}[opening]
 
     while index < len(source):
         char = source[index]
@@ -37,12 +39,12 @@ def _matching_brace(source: str, opening_index: int) -> int | None:
                 state = "block_comment"
                 index += 2
                 continue
-            if char in {"'", '"'}:
+            if char in {"'", '"', "`"}:
                 state = "string"
                 quote = char
-            elif char == "{":
+            elif char == opening:
                 depth += 1
-            elif char == "}":
+            elif char == closing:
                 depth -= 1
                 if depth == 0:
                     return index
@@ -78,7 +80,7 @@ def _literal_mapping_path(annotation: str) -> str | None:
 
     content = arguments.group(1).strip()
     literal = re.search(
-        r"(?:^|\b(?:value|path)\s*=\s*)[\"']([^\"']*)[\"']",
+        r"(?:^|\b(?:value|path)\s*=\s*)[\"']([^\"']*)[\"']\s*(?=,|$)",
         content,
     )
     return literal.group(1) if literal else None
@@ -86,7 +88,7 @@ def _literal_mapping_path(annotation: str) -> str | None:
 
 def _mapping_from_annotations(annotations: str) -> tuple[str, str] | None:
     shortcut = re.findall(
-        r"@(Get|Post|Put|Patch|Delete)Mapping\s*(\([^\n]*\))?",
+        r"@(Get|Post|Put|Patch|Delete|Head|Options)Mapping\s*(\([^\n]*\))?",
         annotations,
         re.IGNORECASE,
     )
@@ -108,7 +110,7 @@ def _mapping_from_annotations(annotations: str) -> tuple[str, str] | None:
 
     arguments = request_mappings[0]
     method_match = re.search(
-        r"\bmethod\s*=\s*RequestMethod\.(GET|POST|PUT|PATCH|DELETE)\b",
+        r"\bmethod\s*=\s*RequestMethod\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b",
         arguments,
         re.IGNORECASE,
     )
@@ -175,7 +177,7 @@ def _backend_success_status(
     return None
 
 
-def _extract_backend_routes(backend_result: str) -> list[dict]:
+def _extract_backend_routes(backend_result: str, unverified=None) -> list[dict]:
     routes = []
     class_pattern = re.compile(
         r"(?P<annotations>(?:\s*@[\w.]+(?:\([^\n]*\))?\s*)*)"
@@ -186,16 +188,23 @@ def _extract_backend_routes(backend_result: str) -> list[dict]:
         r"(?P<annotations>(?:\s*@[\w.]+(?:\([^\n]*\))?\s*)+)"
         r"(?:(?:public|protected|private|static|final|synchronized)\s+)+"
         r"(?P<return_type>[\w.<>, ?\[\]]+)\s+"
-        r"[A-Za-z_]\w*\s*\([^)]*\)\s*\{"
+        r"[A-Za-z_]\w*\s*\("
     )
 
     for block in JAVA_BLOCK_PATTERN.findall(backend_result):
+        block = _mask_non_code(block, strings=False)
+        route_start = len(routes)
+        mapping_count = len(re.findall(
+            r"@(?:Get|Post|Put|Patch|Delete|Head|Options)Mapping\b|"
+            r"@RequestMapping\b", block, re.IGNORECASE,
+        ))
         for class_match in class_pattern.finditer(block):
             class_open = class_match.end() - 1
             class_close = _matching_brace(block, class_open)
             if class_close is None:
                 continue
             class_annotations = class_match.group("annotations") or ""
+            mapping_count -= len(re.findall(r"@RequestMapping\b", class_annotations))
             base_path = _class_base_path(class_annotations)
             if base_path is None:
                 continue
@@ -207,7 +216,13 @@ def _extract_backend_routes(backend_result: str) -> list[dict]:
                 if mapping is None:
                     continue
                 method, method_path = mapping
-                method_open = method_match.end() - 1
+                parameters_close = _matching_brace(class_body, method_match.end() - 1)
+                if parameters_close is None:
+                    continue
+                body_start = re.match(r"\s*\{", class_body[parameters_close + 1:])
+                if body_start is None:
+                    continue
+                method_open = parameters_close + 1 + body_start.end() - 1
                 method_close = _matching_brace(class_body, method_open)
                 if method_close is None:
                     continue
@@ -222,6 +237,8 @@ def _extract_backend_routes(backend_result: str) -> list[dict]:
                         method_body,
                     ),
                 })
+        if unverified is not None and len(routes) - route_start != mapping_count:
+            unverified.append("일부 Backend mapping을 추출하지 못했습니다.")
     return routes
 
 
@@ -252,46 +269,106 @@ def _forced_status(content: str, variable_name: str | None) -> int | None:
     return next(iter(statuses)) if len(statuses) == 1 else None
 
 
-def _extract_frontend_requests(frontend_result: str) -> list[dict]:
+def _mask_non_code(source: str, *, strings: bool = True) -> str:
+    """Preserve offsets while ignoring comments and quoted examples."""
+    result = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            end = len(source) if end < 0 else end
+        elif source.startswith("/*", index):
+            closing = source.find("*/", index + 2)
+            end = len(source) if closing < 0 else closing + 2
+        elif source[index] in "\"'`":
+            quote = source[index]
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                elif source[end] == quote:
+                    end += 1
+                    break
+                else:
+                    end += 1
+            if not strings:
+                index = end
+                continue
+        else:
+            index += 1
+            continue
+        result[index:end] = ["\n" if c == "\n" else " " for c in source[index:end]]
+        index = end
+    return "".join(result)
+
+
+def _request_path(value: str) -> str | None:
+    # Support root-relative literals and whole-segment template parameters only.
+    if not value.startswith("/"):
+        return None
+    value = re.sub(r"\$\{[^{}]+\}", "{param}", value)
+    if "$" in value or re.search(r"[^/]\{param\}|\{param\}[^/?#]", value):
+        return None
+    return _normalize_path(re.split(r"[?#]", value, maxsplit=1)[0])
+
+
+def _extract_frontend_requests(frontend_result: str, unverified=None) -> list[dict]:
     requests = []
-    axios_pattern = re.compile(
-        r"\baxios\.(get|post|put|patch|delete)\s*\(\s*"
-        r"([\"'])(/[^\"']*)\2",
-        re.IGNORECASE,
-    )
-    fetch_pattern = re.compile(
-        r"\bfetch\s*\(\s*([\"'])(/[^\"']*)\1\s*,\s*\{",
-        re.IGNORECASE,
-    )
-
+    call_pattern = re.compile(r"\b(fetch|axios(?:\.[A-Za-z_]\w*)?)\s*\(")
     for content in FRONTEND_BLOCK_PATTERN.findall(frontend_result):
-        for match in axios_pattern.finditer(content):
-            response_variable = _assigned_response_variable(content, match.start())
-            requests.append({
-                "method": match.group(1).upper(),
-                "path": _normalize_path(match.group(3)),
-                "status": _forced_status(content, response_variable),
-            })
-
-        for match in fetch_pattern.finditer(content):
-            options_open = match.end() - 1
-            options_close = _matching_brace(content, options_open)
-            if options_close is None:
+        code = _mask_non_code(content)
+        for match in call_pattern.finditer(code):
+            args = content[match.end():]
+            literal = re.match(r"\s*([\"'`])([^\"'`\r\n]*)\1\s*(?=[,)])", args)
+            path = _request_path(literal.group(2)) if literal else None
+            if literal and literal.group(1) != "`" and "${" in literal.group(2):
+                path = None
+            method = None
+            if match.group(1).startswith("axios"):
+                candidate = match.group(1).partition(".")[2].upper()
+                if candidate in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                    method = candidate
+            elif literal:
+                after_url = args[literal.end():]
+                if after_url.startswith(")"):
+                    method = "GET"
+                else:
+                    options = re.match(r",\s*\{", after_url)
+                    if options:
+                        opening = match.end() + literal.end() + options.end() - 1
+                        closing = _matching_brace(content, opening)
+                        if closing is not None:
+                            options_text = _mask_non_code(content[opening + 1:closing], strings=False)
+                            method_matches = list(re.finditer(
+                                r"\bmethod\s*:\s*([\"'])(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\1\s*(?=,|$)",
+                                options_text, re.IGNORECASE,
+                            ))
+                            if len(method_matches) == 1 and not re.search(r"\.\.\.", options_text):
+                                method = method_matches[0].group(2).upper()
+                            elif not re.search(r"\bmethod\b|\.\.\.", options_text):
+                                method = "GET"
+            if path is None or method is None:
+                if unverified is not None:
+                    unverified.append("Frontend HTTP 요청의 URL 또는 Method를 추출하지 못했습니다.")
                 continue
-            options = content[options_open + 1:options_close]
-            method_match = re.search(
-                r"\bmethod\s*:\s*([\"'])(GET|POST|PUT|PATCH|DELETE)\1",
-                options,
-                re.IGNORECASE,
-            )
-            if method_match is None:
-                continue
             response_variable = _assigned_response_variable(content, match.start())
-            requests.append({
-                "method": method_match.group(2).upper(),
-                "path": _normalize_path(match.group(2)),
-                "status": _forced_status(content, response_variable),
-            })
+            # A common variable name in another request/function is a different
+            # response. Do not mix its success condition into this request.
+            end = len(code)
+            if response_variable:
+                next_assignment = re.search(
+                    rf"\b(?:const|let|var)\s+{re.escape(response_variable)}\s*=",
+                    code[match.end():],
+                )
+                if next_assignment:
+                    end = match.end() + next_assignment.start()
+            status_code = code[match.start():end]
+            status = _forced_status(status_code, response_variable)
+            if (response_variable and status is None and unverified is not None
+                and re.search(rf"\b{re.escape(response_variable)}\.status\s*===|===\s*{re.escape(response_variable)}\.status", status_code)):
+                unverified.append("Frontend 성공 status 조건을 확정하지 못했습니다.")
+            requests.append({"method": method, "path": path,
+                             "status": status})
     return requests
 
 
@@ -351,69 +428,105 @@ def _success_status_target(
     return "UNKNOWN"
 
 
+def _path_matches(backend_path: str, request_path: str) -> bool:
+    backend_parts = backend_path.strip("/").split("/")
+    request_parts = request_path.strip("/").split("/")
+    return len(backend_parts) == len(request_parts) and all(
+        re.fullmatch(r"\{[A-Za-z_]\w*\}", backend) is not None or backend == request
+        for backend, request in zip(backend_parts, request_parts)
+    )
+
+
+def _issue(rule, message, required_fix, target="UNKNOWN"):
+    return {"severity": "Major", "rule": rule, "target_agent": target,
+            "message": message, "required_fix": required_fix}
+
+
 def validate_integration_result(
     backend_result: str,
     frontend_result: str,
     user_request: str = "",
     project_plan: str = "",
 ) -> dict:
+    """Verify every extracted request against the supported Backend contracts.
+
+    PASS covers method/path/segment parameters and explicit success conditions,
+    not DTO schemas, authentication behavior, or application runtime. Unsupported
+    or incomplete extraction remains NOT_VERIFIED even if other pairs match.
+    """
     del project_plan
-    issues = []
-    backend_routes = _extract_backend_routes(backend_result)
-    frontend_requests = _extract_frontend_requests(frontend_result)
+    issues, unverified = [], []
+    backend_routes = _extract_backend_routes(backend_result, unverified)
+    backend_incomplete = bool(unverified)
+    frontend_requests = _extract_frontend_requests(frontend_result, unverified)
+    if not backend_routes:
+        unverified.append("비교할 Backend endpoint를 추출하지 못했습니다.")
+    if not frontend_requests:
+        unverified.append("비교할 Frontend HTTP 요청을 추출하지 못했습니다.")
+    usable_routes = []
+    for route in backend_routes:
+        # Regex/ant mappings require a richer Spring matcher; do not guess.
+        without_parameters = re.sub(r"\{[A-Za-z_]\w*\}", "", route["path"])
+        if any(c in without_parameters for c in "{}*?"):
+            backend_incomplete = True
+            unverified.append(f"지원하지 않는 Backend path 패턴: {route['path']}")
+        else:
+            usable_routes.append(route)
 
-    if len(backend_routes) != 1 or len(frontend_requests) != 1:
-        return {"status": "PASS", "issues": []}
-
-    backend = backend_routes[0]
-    frontend = frontend_requests[0]
-
-    if backend["method"] != frontend["method"]:
-        issues.append({
-            "severity": "Major",
-            "rule": "HTTP_METHOD_MISMATCH",
-            "target_agent": "UNKNOWN",
-            "message": (
-                f"Backend는 {backend['method']}이지만 Frontend는 "
-                f"{frontend['method']}를 사용합니다."
-            ),
-            "required_fix": "Backend와 Frontend의 HTTP Method를 일치시키세요.",
-        })
-
-    if backend["path"] != frontend["path"]:
-        issues.append({
-            "severity": "Major",
-            "rule": "ENDPOINT_PATH_MISMATCH",
-            "target_agent": "UNKNOWN",
-            "message": (
-                f"Backend endpoint는 {backend['path']}이지만 Frontend는 "
-                f"{frontend['path']}를 호출합니다."
-            ),
-            "required_fix": "Backend와 Frontend의 endpoint path를 일치시키세요.",
-        })
-
-    if (
-        backend["status"] is not None
-        and frontend["status"] is not None
-        and backend["status"] != frontend["status"]
-    ):
-        issues.append({
-            "severity": "Major",
-            "rule": "SUCCESS_STATUS_MISMATCH",
-            "target_agent": _success_status_target(
-                backend["status"],
-                frontend["status"],
-                user_request,
-                backend_result,
-            ),
-            "message": (
-                f"Backend 성공 status는 {backend['status']}이지만 Frontend는 "
-                f"{frontend['status']}을 성공 조건으로 사용합니다."
-            ),
-            "required_fix": "Backend 성공 status와 Frontend 성공 조건을 일치시키세요.",
-        })
-
+    checked = 0
+    status_checked = 0
+    for request in frontend_requests:
+        label = f"{request['method']} {request['path']}"
+        same_path = [r for r in usable_routes if _path_matches(r["path"], request["path"])]
+        exact = [r for r in same_path if r["path"] == request["path"]]
+        if exact:
+            same_path = exact  # Spring literal paths take precedence over parameters.
+        if not same_path:
+            dynamic_literal = "{param}" in request["path"] and any(
+                _path_matches(request["path"], r["path"]) for r in usable_routes
+            )
+            if not backend_routes or backend_incomplete or dynamic_literal:
+                unverified.append(f"Backend 추출이 불완전하여 대응 여부를 확인할 수 없습니다: {label}")
+            else:
+                issues.append(_issue("ENDPOINT_PATH_MISMATCH",
+                    f"Frontend 요청 {label}에 대응하는 Backend endpoint가 없습니다.",
+                    "Frontend URL과 Backend endpoint path를 일치시키세요."))
+            continue
+        matches = [r for r in same_path if r["method"] == request["method"]]
+        if not matches:
+            if backend_incomplete:
+                unverified.append(f"지원하는 Backend Method를 확정할 수 없습니다: {label}")
+            else:
+                issues.append(_issue("HTTP_METHOD_MISMATCH",
+                    f"Frontend 요청 {label}의 Method가 Backend와 일치하지 않습니다.",
+                    "Backend와 Frontend의 HTTP Method를 일치시키세요."))
+            continue
+        # Repeated identical code is harmless, conflicting contracts are not.
+        signatures = {(r["path"], r["status"]) for r in matches}
+        if len(signatures) != 1:
+            unverified.append(f"대응 Backend 계약이 여러 개여서 확정할 수 없습니다: {label}")
+            continue
+        backend = matches[0]
+        checked += 1
+        if request["status"] is not None:
+            if backend["status"] is None:
+                unverified.append(f"Backend 성공 status를 확정할 수 없습니다: {label}")
+            else:
+                status_checked += 1
+                if backend["status"] != request["status"]:
+                    issues.append(_issue("SUCCESS_STATUS_MISMATCH",
+                        f"{label}: Backend 성공 status는 {backend['status']}이지만 Frontend는 {request['status']}을 성공 조건으로 사용합니다.",
+                        "Backend 성공 status와 Frontend 성공 조건을 일치시키세요.",
+                        _success_status_target(backend["status"], request["status"], user_request, backend_result)))
+    unverified = list(dict.fromkeys(unverified))
+    failed = bool(issues)
+    if unverified:
+        issues.append(_issue("INTEGRATION_NOT_VERIFIED", " ".join(unverified),
+            "비교 가능한 Backend endpoint와 Frontend HTTP 호출을 제공하고 미확인 계약을 검증하세요."))
     return {
-        "status": "PASS" if not issues else "FAIL",
+        "status": "FAIL" if failed else "NOT_VERIFIED" if unverified else "PASS",
         "issues": issues,
+        "coverage": {"backend_routes": len(backend_routes), "frontend_requests": len(frontend_requests),
+                     "matched_requests": checked, "explicit_status_checks": status_checked,
+                     "unverified": unverified},
     }

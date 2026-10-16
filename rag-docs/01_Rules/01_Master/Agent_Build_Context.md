@@ -4,7 +4,7 @@
 
 - Backend Foundation 완료
 - AI Foundation 완료
-- Frontend Foundation 진행 예정
+- Frontend Foundation 완료
 - Expert 문서는 후순위
 
 ## 목표 Agent 구조

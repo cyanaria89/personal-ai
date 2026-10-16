@@ -178,26 +178,32 @@ def test_response_status_created_matches_201() -> None:
     assert validate_integration_result(backend, frontend)["status"] == "PASS"
 
 
-def test_response_ok_skips_status_check() -> None:
+def test_response_ok_checks_method_and_path_without_fixed_status() -> None:
     frontend = frontend_fixture(condition="if (response.ok) {}")
-    assert validate_integration_result(backend_fixture(), frontend)["status"] == "PASS"
+    result = validate_integration_result(backend_fixture(), frontend)
+    assert result["status"] == "PASS"
+    assert result["coverage"]["matched_requests"] == 1
+    assert result["coverage"]["explicit_status_checks"] == 0
 
 
-def test_callback_prop_style_is_skipped() -> None:
+def test_callback_prop_style_is_not_verified() -> None:
     frontend = frontend_fixture("await onSignup?.(formData);")
-    assert validate_integration_result(backend_fixture(), frontend)["status"] == "PASS"
+    assert validate_integration_result(backend_fixture(), frontend)["status"] == "NOT_VERIFIED"
 
 
-def test_dynamic_endpoint_is_skipped() -> None:
+def test_dynamic_endpoint_is_not_verified() -> None:
     frontend = frontend_fixture(
         "const response = await fetch(`${apiBase}/signup`, { method: 'POST' });"
     )
-    assert validate_integration_result(backend_fixture(), frontend)["status"] == "PASS"
+    assert validate_integration_result(backend_fixture(), frontend)["status"] == "NOT_VERIFIED"
 
 
-def test_multiple_backend_mappings_are_skipped() -> None:
+def test_multiple_backend_mappings_compare_matching_request() -> None:
     backend = backend_fixture() + backend_fixture(mapping='@PostMapping("/other")')
-    assert validate_integration_result(backend, frontend_fixture())["status"] == "PASS"
+    result = validate_integration_result(backend, frontend_fixture())
+    assert result["status"] == "PASS"
+    assert result["coverage"]["backend_routes"] == 2
+    assert result["coverage"]["matched_requests"] == 1
 
 
 def test_backend_only_and_frontend_only_skip_integration_route() -> None:
