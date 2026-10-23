@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 import copy
 import io
 import json
@@ -182,7 +183,7 @@ class FrontendNodeRagTest(unittest.TestCase):
         with (patch.object(nodes, "search_frontend_context") as search,
               patch.object(nodes, "search_db_context", return_value=[]),
               patch.object(nodes, "validate_db_result", return_value={"status":"PASS", "issues":[]}),
-              patch.object(nodes, "invoke_agent", side_effect=["REQUIRED_AGENTS: db", "DB_RESULT",
+              patch.object(nodes, "invoke_agent", side_effect=[valid_pm_plan('db'), "DB_RESULT",
                   json.dumps({"status":"PASS", "summary":"ok", "issues":[]})])):
             output = create_workflow().invoke(self.state)
         search.assert_not_called()

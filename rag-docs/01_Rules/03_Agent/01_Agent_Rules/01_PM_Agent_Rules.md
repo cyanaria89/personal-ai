@@ -95,48 +95,31 @@ Handoff에는 해당 Agent가 작업하기 위해 필요한 정보만 포함한�
 - 동일 내용을 반복하지 않는다.
 - 구현 결과를 미리 작성하지 않는다.
 - 다른 Agent의 책임을 대신 수행하지 않는다.
-- Agent별 Handoff는 가능한 한 2~5개 항목으로 제한한다.
+- Agent별 Handoff는 1~2개의 짧은 작업 지시로 제한한다.
+- API 경로·테이블명·DTO명·파일명은 허용하되 SQL 문장·Java/React 코드 본문은 쓰지 않는다.
 
 ---
 
 ## 7. Output Format
 
-첫 번째 줄은 반드시 다음 형식이어야 한다.
+첫 줄 REQUIRED_AGENTS:에는 db/backend/frontend 목록 또는 단독 none을 쓴다.
+REQUEST_SUMMARY는 한 문장, EXECUTION_ORDER는 선택된 Agent만 db → backend → frontend 순서로 쓰고 review로 끝낸다.
+선택된 Agent의 Handoff만 비어 있지 않은 내용으로 작성한다. none도 Summary는 필수이며 순서는 review, Handoff는 생략한다.
+코드 fence·서문·구현 예제 없이 아래 필수 구조만 출력한다.
 
-```text
-REQUIRED_AGENTS: db
-REQUIRED_AGENTS: backend
-REQUIRED_AGENTS: db, backend
+정상 출력 예시 — 실제 요청에 맞춰 바꾸며 예시 기능을 새 요구로 추가하지 않는다.
+
 REQUIRED_AGENTS: db, backend, frontend
-REQUIRED_AGENTS: none
-```
-
-그 다음:
-
-```text
-REQUEST_SUMMARY:
-<짧은 요청 요약>
-
-EXECUTION_ORDER:
-<agent -> agent -> review>
-```
-
-선택된 Agent에 대해서만 Handoff를 작성한다.
-
-```text
+REQUEST_SUMMARY: 메모 등록과 목록 조회를 위임한다.
+EXECUTION_ORDER: db -> backend -> frontend -> review
 DB_HANDOFF:
-- ...
-
+- memo의 컬럼·제약조건·DDL·조회 SQL을 담당한다.
 BACKEND_HANDOFF:
-- ...
-
+- POST/GET /api/memos와 MemoResponse 계약을 구현한다.
 FRONTEND_HANDOFF:
-- ...
-```
+- MemoPage.tsx의 입력 검증·등록·조회·오류 처리를 구현한다.
 
-선택되지 않은 Agent의 Handoff 섹션은 절대 출력하지 않는다.
-예를 들어 required_agents가 db이면 BACKEND_HANDOFF와 FRONTEND_HANDOFF는 제목 자체도 출력하지 않는다.
-"None", "없음", "N/A" 등의 placeholder도 출력하지 않는다.
+미선택 Agent는 Handoff 제목도 출력하지 않는다. "None", "없음", "N/A" 등의 placeholder도 쓰지 않는다.
 
 ---
 

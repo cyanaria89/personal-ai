@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 import copy
 import json
 import unittest
@@ -61,7 +62,7 @@ class BackendDomainRagTest(unittest.TestCase):
 
     def test_backend_not_selected_does_not_search(self):
         state = copy.deepcopy(self.state)
-        responses = ["REQUIRED_AGENTS: frontend", "FRONTEND_RESULT", json.dumps({
+        responses = [valid_pm_plan('frontend'), "FRONTEND_RESULT", json.dumps({
             "status": "PASS", "summary": "ok", "issues": [],
         })]
         with (

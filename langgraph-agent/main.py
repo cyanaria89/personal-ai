@@ -136,6 +136,7 @@ def main(argv: list[str] | None = None) -> None:
         "llm_metrics": [],
         "required_agents": [],
         "project_plan": "",
+        "pm_validation": {"status": "NOT_RUN", "issues": []},
         "db_result": "",
         "db_validation": {
             "status": "NOT_RUN",

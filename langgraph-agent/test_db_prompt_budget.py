@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 """DB 입력 예산의 결정적 회귀. 실제 Ollama·임베딩 API는 호출하지 않는다."""
 import copy
 import json
@@ -143,7 +144,7 @@ def test_db_initial_and_long_fix_keep_contracts_while_reducing_optional_rag(fix)
 def test_graph_propagates_explicit_budget_failure_without_partial_result_or_review():
     from graph.workflow import create_workflow
     state = db_state("매우 긴 필수 요구사항 " * 10000)
-    pm = LocalLlmDouble("REQUIRED_AGENTS: db")
+    pm = LocalLlmDouble(valid_pm_plan('db'))
     db, review = LocalLlmDouble(), LocalLlmDouble()
     with patch.object(nodes, "pm_llm", pm), patch.object(nodes, "db_llm", db), \
          patch.object(nodes, "review_llm", review), patch.object(nodes, "search_db_context") as search:

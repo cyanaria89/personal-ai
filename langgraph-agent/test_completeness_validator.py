@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 """정적 완성도 검사와 기존 Graph 연계의 결정적 회귀 테스트."""
 import copy
 import json
@@ -167,7 +168,7 @@ class CompletenessGraphTest(unittest.TestCase):
         s=self.state()
         bad=backend('throw new UnsupportedOperationException("not implemented");')
         with (patch.object(nodes,'search_backend_context',return_value=[]),
-              patch.object(nodes,'invoke_agent',side_effect=['REQUIRED_AGENTS: backend',bad,bad,bad,json.dumps({'status':'PASS','issues':[]})])):
+              patch.object(nodes,'invoke_agent',side_effect=[valid_pm_plan('backend'),bad,bad,bad,json.dumps({'status':'PASS','issues':[]})])):
             result=create_workflow().invoke(s)
         self.assertEqual(result['backend_fix_count'],2)
         self.assertEqual(result['integration_fix_count'],0)
@@ -178,7 +179,7 @@ class CompletenessGraphTest(unittest.TestCase):
         bad=backend('throw new UnsupportedOperationException("not implemented");')
         good=backend('return issuer.issue(request);')
         with (patch.object(nodes,'search_backend_context',return_value=[]),
-              patch.object(nodes,'invoke_agent',side_effect=['REQUIRED_AGENTS: backend',bad,good,json.dumps({'status':'PASS','issues':[]})])):
+              patch.object(nodes,'invoke_agent',side_effect=[valid_pm_plan('backend'),bad,good,json.dumps({'status':'PASS','issues':[]})])):
             result=create_workflow().invoke(s)
         self.assertEqual(result['backend_fix_count'],1)
         self.assertTrue(result['final_result'].endswith('PASS'))

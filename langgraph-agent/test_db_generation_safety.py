@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 """DB 계약·Fix·실패 종료 회귀. 모든 LLM과 RAG 호출은 테스트 대역을 사용한다."""
 import copy
 import json
@@ -191,7 +192,7 @@ def test_same_output_that_now_validates_successfully_is_not_blocked():
 def test_graph_finishes_with_real_validators_and_bounded_db_fixes(outputs, expected_fixes, expected_status):
     state = db_state()
     db = LocalLlmDouble(*outputs)
-    pm = LocalLlmDouble("REQUIRED_AGENTS: db\nDB_HANDOFF:\n- 요구 계약 충족")
+    pm = LocalLlmDouble(valid_pm_plan('db'))
     review = LocalLlmDouble(json.dumps({"status": "PASS", "issues": [], "summary": "ok"}))
     with patch.object(nodes, "db_llm", db), patch.object(nodes, "pm_llm", pm), \
          patch.object(nodes, "review_llm", review), patch.object(nodes, "search_db_context", return_value=[]):
@@ -228,7 +229,7 @@ def test_no_progress_graph_skips_selected_downstream_agents_and_keeps_final_fail
     state = db_state(required_agents=["db", "backend", "frontend"])
     db = LocalLlmDouble(DDL, DDL)
     backend, frontend = LocalLlmDouble(), LocalLlmDouble()
-    pm = LocalLlmDouble("REQUIRED_AGENTS: db, backend, frontend")
+    pm = LocalLlmDouble(valid_pm_plan('db', 'backend', 'frontend'))
     review = LocalLlmDouble(json.dumps({"status": "PASS", "issues": []}))
     with patch.object(nodes, "db_llm", db), patch.object(nodes, "pm_llm", pm), \
          patch.object(nodes, "review_llm", review), patch.object(nodes, "backend_llm", backend), \

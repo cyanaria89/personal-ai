@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 import json
 import tempfile
 import unittest
@@ -72,7 +73,7 @@ class ProjectContextIntegrationTest(unittest.TestCase):
             if function is nodes.review_agent:
                 return json.dumps({"status": "PASS", "summary": "ok", "issues": [], "rag_update_candidates": []})
             if function is nodes.pm_agent:
-                return "REQUIRED_AGENTS: backend"
+                return valid_pm_plan('backend')
             return "RESULT"
 
         patches = [patch.object(nodes, "invoke_agent", side_effect=fake_invoke)]
@@ -125,7 +126,7 @@ class ProjectContextIntegrationTest(unittest.TestCase):
         state["project_root"] = str(self.root)
         prompts = []
         responses = [
-            "REQUIRED_AGENTS: backend, frontend",
+            valid_pm_plan('backend', 'frontend'),
             "BACKEND_RESULT",
             "FRONTEND_RESULT",
             json.dumps({"status": "PASS", "summary": "ok", "issues": [], "rag_update_candidates": []}),

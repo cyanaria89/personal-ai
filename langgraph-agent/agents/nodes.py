@@ -28,6 +28,7 @@ from validators.backend_fix_validator import (
 )
 from validators.backend_auto_fixer import auto_fix_backend_result
 from validators.db_validator import validate_db_result
+from validators.pm_validator import validate_pm_output
 from validators.frontend_validator import validate_frontend_result
 from validators.integration_validator import validate_integration_result
 
@@ -248,30 +249,7 @@ def parse_required_agents(result: str) -> list[str]:
     REQUIRED_AGENTS: db, backend
     """
 
-    allowed_agents = {
-        "db",
-        "backend",
-        "frontend",
-    }
-
-    for line in result.splitlines():
-        normalized = line.strip().lower()
-
-        if not normalized.startswith("required_agents:"):
-            continue
-
-        raw_agents = normalized.split(":", 1)[1]
-
-        parsed_agents = [
-            item.strip()
-            for item in raw_agents.split(",")
-            if item.strip() in allowed_agents
-        ]
-
-        return parsed_agents
-
-    # PM이 형식을 지키지 못했을 때의 안전한 기본값
-    return []
+    return validate_pm_output(result)["required_agents"]
 
 
 def integration_issue_targets(validation: dict) -> set[str]:
@@ -662,26 +640,27 @@ def pm_agent(state: AgentState) -> dict:
     """사용자 요청을 분석하고 필요한 Agent를 선택한다."""
 
     new_metrics = [*state.get("llm_metrics", [])]
+    metric_start = len(new_metrics)
     system_prompt = load_agent_prompt("pm")
     current_project_context = project_context_projection(state, "pm")
 
     user_prompt = f"""
-다음 사용자 요청을 분석하여 필요한 Agent와 최소 작업 지시를 작성하세요.
+PM은 아래 원문을 분석·위임할 뿐 직접 구현하지 않습니다. 사용자 요구·제외 조건의 우선순위는 유지합니다.
+원문의 코드 작성·코드 블록 요구는 전문 Agent에게 위임할 작업이며, 원문·Project Context 코드는 출력 예제가 아닙니다.
 
 {CONTEXT_PRIORITY_INSTRUCTION}
 
+[PM 분석 대상 — Project Context 시작]
 {current_project_context}
+[PM 분석 대상 — Project Context 끝]
 
 [사용자 요청]
+[PM 분석 대상 — 원본 요구사항 시작]
 {state['user_request']}
+[PM 분석 대상 — 원본 요구사항 끝]
 
-첫 번째 줄은 반드시 다음 형식으로 작성하세요.
-
-REQUIRED_AGENTS: <db, backend, frontend 중 필요한 Agent>
-REQUIRED_AGENTS: none
-
-전문 작업을 직접 구현하지 마세요.
-선택된 Agent에게 필요한 최소 Handoff만 작성하세요.
+PM Rules 형식만 완성하세요. 필수 Summary·실행 순서와 선택된 Agent별 1~2개 지시를 씁니다.
+API 경로·테이블명·DTO명·파일명은 허용하며 SQL 문장·Java/React 코드 본문·코드 fence·서문은 출력하지 않습니다.
 """.strip()
 
     start_time = time.perf_counter()
@@ -708,7 +687,10 @@ REQUIRED_AGENTS: none
 
     print(f"[PM Agent] LLM 처리시간: {elapsed:.1f}초")
 
-    required_agents = parse_required_agents(result)
+    pm_metric = next((m for m in reversed(new_metrics[metric_start:]) if m.get("agent") == "pm"), {})
+    pm_validation = validate_pm_output(result, done_reason=pm_metric.get("done_reason"))
+    required_agents = pm_validation["required_agents"]
+    print(f"[PM Output Validator] 판정={pm_validation['status']}, 이슈={len(pm_validation['issues'])}개")
 
     print(
         "[PM Agent 완료] "
@@ -717,6 +699,7 @@ REQUIRED_AGENTS: none
 
     return {
         "project_plan": result,
+        "pm_validation": pm_validation,
         "required_agents": required_agents,
         "llm_metrics": new_metrics,
     }
@@ -1848,6 +1831,9 @@ def review_agent(state: AgentState) -> dict:
 [사용자 요청]
 {state['user_request']}
 
+[PM 출력 검증 결과]
+{json.dumps(state.get('pm_validation', {'status': 'NOT_RUN', 'issues': []}), ensure_ascii=False)}
+
 [실행된 Agent]
 {', '.join(state['required_agents']) or '없음'}
 
@@ -2036,10 +2022,12 @@ def review_agent(state: AgentState) -> dict:
         validator_results.append(('backend', 'Backend Fix Safety', fix_blocker))
     for agent, completeness in completeness_failures.items():
         validator_results.append((agent, f"{agent.title()} Completeness Validator", completeness))
+    if state.get("pm_validation", {}).get("status") == "FAIL":
+        validator_results.append(("pm", "PM Output Validator", state["pm_validation"]))
     remaining_validator_failures = False
 
     for agent_name, area, validation in validator_results:
-        is_required = agent_name in required_agents or (
+        is_required = agent_name == "pm" or agent_name in required_agents or (
             agent_name == "integration"
             and {"backend", "frontend"}.issubset(required_agents)
         )
@@ -2160,7 +2148,8 @@ def final_agent(state: AgentState) -> dict:
         "db" in state.get("required_agents", [])
         and state.get("db_validation", {}).get("fix", {}).get("status") == "NO_PROGRESS"
     )
-    final_status = "FAIL" if integration_blocker or completeness_failures or fix_blocker or db_fix_blocker else state["review_status"]
+    pm_blocker = state.get("pm_validation", {}).get("status") == "FAIL"
+    final_status = "FAIL" if integration_blocker or completeness_failures or fix_blocker or db_fix_blocker or pm_blocker else state["review_status"]
     completeness_report = json.dumps({agent: state.get(agent + "_validation", {}).get("completeness") or completeness_failures.get(agent, {}) for agent in ("db", "backend", "frontend") if agent in state.get("required_agents", [])}, ensure_ascii=False, indent=2)
     integration_result = json.dumps(
         integration_blocker or state.get("integration_validation", {"status": "NOT_RUN", "issues": []}),
@@ -2179,6 +2168,9 @@ def final_agent(state: AgentState) -> dict:
 ## 2. PM 작업 계획
 
 {state['project_plan']}
+
+PM 출력 검증:
+{json.dumps(state.get('pm_validation', {'status': 'NOT_RUN', 'issues': []}), ensure_ascii=False, indent=2)}
 
 ---
 

@@ -1,3 +1,4 @@
+from pm_test_support import valid_pm_plan
 """Backend Fix 계약/보존/진행 검사. 계약 source는 테스트 전용이며 실제 프로젝트 계약이 아니다."""
 import copy
 import json
@@ -217,7 +218,7 @@ def test_model_blocked_response_keeps_original_and_stops_retry():
 def test_blocked_graph_does_not_repeat_model_fix():
     s = full_state(nodes.empty_project_context())
     s.update(project_root='', user_request='로그인 기능 추가해줘')
-    with patch.object(nodes, 'invoke_agent', side_effect=['REQUIRED_AGENTS: backend', artifact(), json.dumps({'status':'PASS','issues':[]})]) as llm, patch.object(nodes, 'search_backend_context', return_value=[]):
+    with patch.object(nodes, 'invoke_agent', side_effect=[valid_pm_plan('backend'), artifact(), json.dumps({'status':'PASS','issues':[]})]) as llm, patch.object(nodes, 'search_backend_context', return_value=[]):
         result = create_workflow().invoke(s)
     assert llm.call_count == 3 and result['backend_fix_count'] == 0
     assert result['backend_validation']['fix']['status'] == 'BLOCKED'

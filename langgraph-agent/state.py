@@ -13,6 +13,7 @@ class AgentState(TypedDict):
     required_agents: list[str]
 
     project_plan: str
+    pm_validation: dict
     
     db_result: str
     db_validation: dict

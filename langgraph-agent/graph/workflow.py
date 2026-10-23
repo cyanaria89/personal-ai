@@ -48,6 +48,10 @@ def route_after_pm(
 ) -> Literal["db", "backend", "frontend", "review"]:
     """PM이 선택한 Agent 목록에 따라 첫 작업을 결정한다."""
 
+    if state.get("pm_validation", {}).get("status") != "PASS":
+        print("[Graph] PM 출력 검증 실패 또는 미검증: 전문 Agent를 차단하고 Review로 이동합니다.")
+        return "review"
+
     required_agents = state.get(
         "required_agents",
         [],
