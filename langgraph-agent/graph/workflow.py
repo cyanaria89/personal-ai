@@ -80,6 +80,9 @@ def route_after_db(
     )
 
     if validation.get("status") == "FAIL":
+        if validation.get("fix", {}).get("status") == "NO_PROGRESS":
+            print("[Graph] DB Fix NO_PROGRESS: FAIL을 유지하고 Review로 이동합니다.")
+            return "review"
         if state.get("db_fix_count", 0) < get_max_agent_fix_count():
             print("[Graph] DB Validator 실패: DB Agent를 재실행합니다.")
             return "db"

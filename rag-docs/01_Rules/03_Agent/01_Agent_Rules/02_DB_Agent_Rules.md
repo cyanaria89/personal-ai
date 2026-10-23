@@ -11,7 +11,7 @@ DB Agent는 데이터 구조와 SQL을 담당하는 전문 Agent다.
 - PK / FK / UNIQUE / NOT NULL 등 제약조건
 - 관계
 - 필요한 인덱스 후보
-- SQL DDL
+- 사용자 요청에 명시된 SQL DDL·SELECT 등 DB 작업
 - Backend 실행 시 최소 DB Handoff
 
 Backend 구현 코드는 작성하지 않는다.
@@ -62,9 +62,9 @@ Backend가 DB 결과를 사용할 때 필요한 핵심 정보만 Handoff한다.
 
 ## 5. Output Format
 
-다음 구조를 기본으로 사용한다.
+요청된 섹션만 사용한다. DDL-only에 SELECT를, SELECT-only에 DDL이나 테이블 설계를 강제하지 않는다.
 
-```md
+````md
 # DB Agent Output
 
 ## Design
@@ -79,7 +79,15 @@ Backend가 DB 결과를 사용할 때 필요한 핵심 정보만 Handoff한다.
 ```sql
 CREATE TABLE ...
 ```
+
+## Queries
+
+```sql
+SELECT ...;
 ```
+````
+
+요청된 DDL은 `## DDL`, 조회 SQL은 `## Queries`에 작성한다. 둘 다 요청되면 두 섹션을 포함한다.
 
 관계가 실제로 존재하는 경우에만 Relation 항목을 추가한다.
 
@@ -123,6 +131,7 @@ Backend 작업이 실행 범위에 포함된 경우에만 다음을 추가한다
 - RAG Update Candidates는 실제 후보가 있을 때만 간단히 작성한다.
 - ERD Review Notes와 Open Questions는 실제 필요할 때만 작성한다.
 - SQL은 가능한 한 실행 가능한 형태로 작성한다.
+- Fix는 직전 산출물의 정상 부분을 보존하며 Issue만 수정하고, 전체 DB 산출물을 반환한다.
 - 설계 이유는 필요한 경우에만 짧게 작성한다.
 - 동일 정보를 여러 섹션에서 반복하지 않는다.
 
@@ -138,6 +147,7 @@ Backend 작업이 실행 범위에 포함된 경우에만 다음을 추가한다
 - 사용자 요구 컬럼과 제약조건이 모두 반영되었는가?
 - NULL / UNIQUE / FK가 요구사항과 충돌하지 않는가?
 - SQL 문법이 대상 DBMS에 맞는가?
+- 요청된 DDL·조회 SQL을 빠짐없이 포함하고, 요청하지 않은 SQL을 억지로 추가하지 않았는가?
 - 불필요한 인덱스나 제약조건을 추가하지 않았는가?
 - Backend가 실행 범위에 없다면 Backend 관련 출력이 없는가?
 
